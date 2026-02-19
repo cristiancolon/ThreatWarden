@@ -1,3 +1,9 @@
 asyncpg
 httpx
+openai
+pydantic
 python-dotenv
+rich
+typer
+pytest
+pytest-asyncio

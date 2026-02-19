@@ -580,7 +580,7 @@ Description: <from DB in Phase 1 / from crawled content in Phase 1.5>
 Sources: https://nvd.nist.gov/vuln/detail/CVE-2025-1234
 ```
 
-- Total context budget: ~6,000 tokens of retrieved content (leaving room for system prompt + user question + response).
+- Total context budget: ~15,000 tokens of retrieved content (leaving room for system prompt + user question + response). The larger budget accommodates Phase 1.5 semantic search results (crawled articles, exploit write-ups) alongside structured CVE blocks.
 - If over budget, prioritize by: KEV status > has-exploit > EPSS score > CVSS score > recency.
 
 #### 6.4.6 LLM Synthesis
@@ -734,33 +734,38 @@ threatwarden db stats
 
 ```
 ThreatWarden/
-├── requirements.txt            # Python dependencies
 ├── .env.example                # Required environment variables template
-├── docker-compose.yml          # Postgres
-├── PRD.md                      # This document
+├── .gitignore
+├── docker-compose.yml          # Postgres container
+├── pyproject.toml              # Pytest configuration
+├── README.md                   # This document
+├── requirements.txt            # Python dependencies
 ├── src/
 │   ├── scheduler.py            # Entry point — asyncio scheduler for all ingestors
+│   ├── cli/
+│   │   ├── main.py             # Typer entry point, composes sub-apps
+│   │   ├── common.py           # Shared helpers (DB pool, logging, async decorator)
+│   │   ├── ingest.py           # ingest start / sync / status commands
+│   │   ├── chat.py             # chat REPL + one-shot query command
+│   │   └── db.py               # db stats command
 │   ├── db/
 │   │   ├── schema.sql          # Authoritative DDL (CREATE TABLE IF NOT EXISTS)
 │   │   └── writer.py           # Stateless upsert functions + sync metadata
 │   ├── ingestion/
 │   │   ├── base.py             # Ingestor ABC, data classes, shared HTTP helpers
-│   │   ├── nvd.py              # NVD API v2.0 ingestor (fetch + normalize)
+│   │   ├── nvd.py              # NVD API v2.0 ingestor
 │   │   ├── github.py           # GitHub Advisory REST API ingestor
+│   │   ├── exploitdb.py        # Exploit-DB ingestor
+│   │   ├── osv.py              # OSV.dev ingestor
 │   │   ├── cisa_kev.py         # CISA KEV ingestor (stub)
-│   │   ├── epss.py             # EPSS ingestor (stub)
-│   │   ├── exploitdb.py        # Exploit-DB ingestor (stub)
-│   │   └── osv.py              # OSV.dev ingestor (stub)
-│   ├── query/                  # (planned) Query pipeline
-│   │   ├── intent.py           # Intent parsing (LLM structured output → SQL filters)
-│   │   ├── retriever.py        # SQL query builder from parsed intent
-│   │   ├── context.py          # Context assembly + ranking
-│   │   ├── verifier.py         # Self-critique: checks synthesis claims against context
-│   │   └── engine.py           # Full query pipeline orchestration
-│   └── cli/                    # (planned) CLI interface
-│       ├── ingest.py
-│       ├── chat.py
-│       └── db.py
+│   │   └── epss.py             # EPSS ingestor (stub)
+│   └── querying/
+│       ├── intent_parser.py    # Intent parsing (LLM structured output → SQL filters)
+│       ├── retriever.py        # SQL query builder from parsed intent
+│       ├── context_assembler.py # Context assembly + ranking + token budget
+│       ├── synthesizer.py      # LLM synthesis (grounded + conversational paths)
+│       ├── verifier.py         # Self-critique: checks claims against context
+│       └── engine.py           # Full query pipeline orchestration
 │
 │   # Phase 1.5 additions (three independent stages):
 │   ├── crawler/                # Stage 1: Web crawling
@@ -772,9 +777,19 @@ ThreatWarden/
 │       └── embedder.py         # Embed summaries, not raw content
 │
 └── tests/
-    ├── conftest.py
     ├── test_ingestion/
-    └── test_query/
+    │   ├── test_base.py        # Retry logic, shared HTTP helpers
+    │   ├── test_nvd.py         # NVD ingestor tests
+    │   ├── test_github.py      # GitHub ingestor tests
+    │   ├── test_exploitdb.py   # Exploit-DB ingestor tests
+    │   └── test_osv.py         # OSV ingestor tests
+    └── test_querying/
+        ├── test_intent_parser.py
+        ├── test_retriever.py
+        ├── test_context_assembler.py
+        ├── test_synthesizer.py
+        ├── test_verifier.py
+        └── test_engine.py
 ```
 
 ---
@@ -827,7 +842,7 @@ Phase 1 runs entirely locally via Docker Compose for Postgres and the host for t
 # docker-compose.yml
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: postgres:16
     environment:
       POSTGRES_USER: threatwarden
       POSTGRES_PASSWORD: threatwarden
@@ -841,7 +856,7 @@ volumes:
   pgdata:
 ```
 
-We use `pgvector/pgvector:pg16` even in Phase 1. It's just PostgreSQL 16 with the pgvector extension pre-installed — no overhead if we don't use the extension yet, but it's ready when Phase 1.5 enables it.
+Phase 1 uses the standard `postgres:16` image. For Phase 1.5, we'll swap to `pgvector/pgvector:pg16` to enable the pgvector extension for semantic search.
 
 The ThreatWarden scheduler runs on the host during development:
 

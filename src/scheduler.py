@@ -62,7 +62,8 @@ async def main() -> None:
         (GithubIngestor(), two_hours),
         (OSVIngestor(), two_hours),
         (ExploitDBIngestor(), daily),
-        # TODO: Add CISA KEV and EPSS ingestors
+        (EPSSIngestor(), daily),
+        (CISAKEVIngestor(), daily),
     ]
 
     logger.info("starting threatwarden scheduler with %d ingestors", len(ingestors))
