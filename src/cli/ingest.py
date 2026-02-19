@@ -77,13 +77,13 @@ async def start() -> None:
     async with pool.acquire() as conn:
         await init_schema(conn)
 
-    two_hours = int(os.getenv("FAST_INTERVAL", "7200"))
+    six_hours = int(os.getenv("FAST_INTERVAL", "21600"))
     daily = int(os.getenv("DAILY_INTERVAL", "86400"))
 
     schedule: list[tuple[Ingestor, int]] = [
-        (NVDIngestor(), two_hours),
-        (GithubIngestor(), two_hours),
-        (OSVIngestor(), two_hours),
+        (NVDIngestor(), six_hours),
+        (GithubIngestor(), six_hours),
+        (OSVIngestor(), six_hours),
         (ExploitDBIngestor(), daily),
         (CISAKEVIngestor(), daily),
         (EPSSIngestor(), daily),

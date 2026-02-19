@@ -1,12 +1,31 @@
 from typing import Optional
 
 import typer
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.key_binding import KeyBindings
 from rich.markdown import Markdown
 from rich.panel import Panel
 
 from cli.common import async_command, console, err_console, get_pool
 from db.writer import init_schema
 from querying.engine import ask
+
+
+def _build_key_bindings() -> KeyBindings:
+    """Enter submits. Trailing \\ + Enter inserts a newline."""
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _submit(event):
+        buf = event.current_buffer
+        if buf.text.endswith("\\"):
+            buf.text = buf.text[:-1]
+            buf.insert_text("\n")
+        else:
+            buf.validate_and_handle()
+
+    return kb
 
 app = typer.Typer(help="Query engine commands.")
 
@@ -30,8 +49,9 @@ async def one_shot(
     async with pool.acquire() as conn:
         await init_schema(conn)
 
-    async with pool.acquire() as conn:
-        result = await ask(question, conn)
+    with console.status("[bold cyan]Thinking...", spinner="dots"):
+        async with pool.acquire() as conn:
+            result = await ask(question, conn)
 
     if verbose:
         console.print(f"[dim]Intent:[/]  {result.intent}")
@@ -60,14 +80,24 @@ async def chat_repl(
         Panel(
             "[bold]Welcome to ThreatWarden[/]\n"
             "Ask questions about vulnerabilities, packages, or CVEs.\n"
+            "Press [bold cyan]Enter[/] to submit. "
+            "Type [bold cyan][\\] then [bold cyan]Enter[/] for a new line.\n"
             "Type [bold cyan]exit[/] or [bold cyan]quit[/] to leave.",
             border_style="blue",
         )
     )
 
+    session = PromptSession(
+        key_bindings=_build_key_bindings(),
+        multiline=True,
+        prompt_continuation="… ",
+    )
+
     while True:
         try:
-            question = console.input("[bold cyan]> [/]").strip()
+            question = (await session.prompt_async(
+                HTML("<b><ansicyan>&gt; </ansicyan></b>"),
+            )).strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Goodbye.[/]")
             break
@@ -79,8 +109,9 @@ async def chat_repl(
             break
 
         try:
-            async with pool.acquire() as conn:
-                result = await ask(question, conn)
+            with console.status("[bold cyan]Thinking...", spinner="dots"):
+                async with pool.acquire() as conn:
+                    result = await ask(question, conn)
 
             if verbose:
                 console.print(f"[dim]Intent:[/]  {result.intent}")

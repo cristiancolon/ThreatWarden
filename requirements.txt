@@ -1,6 +1,7 @@
 asyncpg
 httpx
 openai
+prompt-toolkit
 pydantic
 python-dotenv
 rich

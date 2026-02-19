@@ -1,5 +1,31 @@
 # ThreatWarden
 
+## Table of Contents
+
+1. [Overview](#1-overview)
+2. [Problem Statement](#2-problem-statement)
+3. [Goals & Non-Goals](#3-goals--non-goals)
+4. [System Architecture](#4-system-architecture)
+5. [Component Specifications](#5-component-specifications)
+   - [5.1 Ingestion Service](#51-ingestion-service)
+   - [5.2 Data Storage — PostgreSQL](#52-data-storage--postgresql)
+   - [5.3 Web Crawler & Vector Embeddings — Phase 1.5](#53-web-crawler--vector-embeddings--phase-15)
+   - [5.4 Query Engine](#54-query-engine)
+   - [5.5 CLI Interface](#55-cli-interface)
+6. [Tech Stack](#6-tech-stack)
+7. [Project Structure](#7-project-structure)
+8. [Configuration](#8-configuration)
+9. [Deployment (Local Development)](#9-deployment-local-development)
+   - [9.1 Setup](#91-setup)
+   - [9.2 Running the Ingestion Service](#92-running-the-ingestion-service)
+   - [9.3 Using the Query Interface](#93-using-the-query-interface)
+   - [9.4 Database Inspection](#94-database-inspection)
+10. [Data Flow — End to End](#10-data-flow--end-to-end)
+11. [Example: Scanning a package.json](#11-example-scanning-a-packagejson)
+12. [Future Work](#12-future-work)
+
+---
+
 ## 1. Overview
 
 ThreatWarden is a continuously-running vulnerability intelligence system that aggregates exploit and CVE data from authoritative sources, stores it in PostgreSQL, and exposes that knowledge through a conversational LLM interface. The goal is to let a developer ask natural-language questions about vulnerabilities relevant to their stack and get grounded, cited, prioritized answers.
@@ -61,17 +87,7 @@ Several projects occupy adjacent parts of this space:
 
 ---
 
-## 4. Users & Personas
-
-| Persona | Description | Primary Use |
-|---|---|---|
-| **Solo Developer** | Works on side projects, wants a quick "am I affected?" check. | Asks about specific packages or CVEs by name. |
-| **Security-Curious Engineer** | Wants to stay informed about emerging threats relevant to their ecosystem. | Asks broad ecosystem questions ("anything new affecting npm this week?"). |
-| **The Builder (You)** | Learning security tooling, building portfolio project with real utility. | Operates, extends, and iterates on the system. |
-
----
-
-## 5. System Architecture
+## 4. System Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -132,24 +148,24 @@ Phase 1.5 additions (dotted lines = new components):
 
 ---
 
-## 6. Component Specifications
+## 5. Component Specifications
 
-### 6.1 Ingestion Service
+### 5.1 Ingestion Service
 
 The ingestion service is a long-running process that periodically fetches vulnerability data from external sources, normalizes it, and writes it to PostgreSQL.
 
-#### 6.1.1 Data Sources
+#### 5.1.1 Data Sources
 
 Each source is implemented as an independent **Ingestor** class (one file per source) that handles both fetching and normalizing. This makes it straightforward to add new sources later.
 
 | Source | Method | Frequency | Data Provided | Priority |
 |---|---|---|---|---|
-| **NVD (National Vulnerability Database)** | REST API v2.0 (`api.nvd.nist.gov`) | Every 2 hours | CVE records, CVSS v3.1 scores, CPE match strings, descriptions, references, CISA KEV flags | P0 — primary CVE source |
-| **GitHub Security Advisories** | REST API (`api.github.com/advisories`) | Every 2 hours | Package-level vulnerability mappings (ecosystem, package name, vulnerable version ranges, patched versions), CVSS via `cvss_severities`, EPSS scores | P0 — best for dependency-level matching |
+| **NVD (National Vulnerability Database)** | REST API v2.0 (`api.nvd.nist.gov`) | Every 6 hours | CVE records, CVSS v3.1 scores, CPE match strings, descriptions, references, CISA KEV flags | P0 — primary CVE source |
+| **GitHub Security Advisories** | REST API (`api.github.com/advisories`) | Every 6 hours | Package-level vulnerability mappings (ecosystem, package name, vulnerable version ranges, patched versions), CVSS via `cvss_severities`, EPSS scores | P0 — best for dependency-level matching |
 | **CISA KEV** | Static JSON download (`cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json`) | Daily | Confirmed actively-exploited CVE IDs, due dates, required actions | P0 — critical severity signal |
 | **EPSS (Exploit Prediction Scoring System)** | CSV download (`epss.cyentia.com`) | Daily | Probability score (0–1) that a CVE will be exploited in the next 30 days, percentile | P1 — prioritization signal |
 | **Exploit-DB** | Git mirror clone + CSV index (`gitlab.com/exploit-database/exploitdb`) | Daily | Proof-of-concept exploit code, metadata, linked CVEs | P1 — exploit maturity signal |
-| **OSV.dev** | REST API (`api.osv.dev`) | Every 2 hours | Standardized vulnerability records across 40+ ecosystems, precise affected version ranges per package | P1 — supplements NVD/GitHub with broader ecosystem coverage and machine-readable version constraints |
+| **OSV.dev** | REST API (`api.osv.dev`) | Every 6 hours | Standardized vulnerability records across 40+ ecosystems, precise affected version ranges per package | P1 — supplements NVD/GitHub with broader ecosystem coverage and machine-readable version constraints |
 
 **Note:** The GitHub Advisory REST API deprecated the `cvss` field in April 2025, replacing it with `cvss_severities` (separate `cvss_v3` and `cvss_v4` objects). The API also provides EPSS data directly. References are returned as plain URL strings, not objects.
 
@@ -157,7 +173,7 @@ Each source is implemented as an independent **Ingestor** class (one file per so
 
 **Note:** OSV.dev aggregates data from GitHub Security Advisories, PyPA, RustSec, and many other ecosystem-specific databases. Its version range format is machine-readable and standardized (OpenSSF OSV schema), making it potentially more reliable for version matching than parsing NVD's CPE strings. Its API has no rate limits.
 
-#### 6.1.2 Ingestor Interface
+#### 5.1.2 Ingestor Interface
 
 Each source is implemented as a single Ingestor class that handles both fetching and normalizing. This collocates the API-specific fetch logic with the API-specific data mapping, avoiding a shared normalizer that would inevitably become a switch statement over source types.
 
@@ -188,7 +204,7 @@ class Ingestor(ABC):
 
 Shared utilities (`get_response_with_retry`, data classes) live in `ingestion/base.py`. Source-specific helpers (e.g., GitHub's `parse_next_url`) live in their respective ingestor modules.
 
-#### 6.1.3 Normalization
+#### 5.1.3 Normalization
 
 Normalization is handled per-ingestor via the `_normalize` method rather than a shared normalizer module. Each source's raw API response has a completely different structure:
 
@@ -198,7 +214,7 @@ Normalization is handled per-ingestor via the `_normalize` method rather than a 
 
 This separation means an API schema change in one source only requires editing one file. A change to the internal `NormalizedVulnerability` structure only requires updating the `_normalize` methods.
 
-#### 6.1.4 Deduplication
+#### 5.1.4 Deduplication
 
 Deduplication is handled at the database level via `INSERT ... ON CONFLICT` (upsert) with no application-level state.
 
@@ -211,7 +227,7 @@ Deduplication is handled at the database level via `INSERT ... ON CONFLICT` (ups
 
 All write operations live in `db/writer.py` as stateless functions that take an asyncpg connection. No deduplicator class — the database is the single source of truth.
 
-#### 6.1.5 Scheduling
+#### 5.1.5 Scheduling
 
 The scheduler uses plain **asyncio** rather than APScheduler. Each ingestor runs as an independent `asyncio` task with its own sleep interval. This eliminates an external dependency for functionality that amounts to "run a function, sleep, repeat."
 
@@ -220,12 +236,12 @@ The scheduler uses plain **asyncio** rather than APScheduler. Each ingestor runs
 - **Overlap window:** On subsequent syncs, 1 hour is subtracted from the high-water mark before fetching. This re-fetches a small window of already-seen records (harmless — upserts are idempotent) but catches records that appeared in the API with an indexing delay.
 - **Batched writes:** Records are committed in batches of 2,000, each in its own transaction. This reduces lock contention (prevents deadlocks when multiple ingestors write overlapping CVEs concurrently) and limits transaction duration.
 - Configurable intervals via environment variables (`FAST_INTERVAL`, `DAILY_INTERVAL`).
-- Default schedule: NVD + GitHub every 2 hours, CISA KEV + EPSS + Exploit-DB daily.
+- Default schedule: NVD + GitHub every 6 hours, CISA KEV + EPSS + Exploit-DB daily.
 - `asyncio.TaskGroup` runs all tasks concurrently with failure isolation — one source failing does not affect others.
 - On first run, `sync_metadata` returns `None` for the high-water mark, causing `fetch_updates(None)` to perform a full historical sync (no overlap applied).
 - Crash recovery is automatic: if a batch fails, previously committed batches are safe and the high-water mark is not updated (it is written in a separate transaction after all batches complete), so the next cycle re-fetches the same window. Upserts are idempotent, so re-processing is safe.
 
-#### 6.1.6 Rate Limiting & Resilience
+#### 5.1.6 Rate Limiting & Resilience
 
 - NVD: honor 50 requests/30s with API key (5 requests/30s without). Obtain a free API key.
 - GitHub: 5,000 requests/hour with PAT. Use Link header pagination.
@@ -234,9 +250,9 @@ The scheduler uses plain **asyncio** rather than APScheduler. Each ingestor runs
 
 ---
 
-### 6.2 Data Storage — PostgreSQL
+### 5.2 Data Storage — PostgreSQL
 
-#### 6.2.1 Schema
+#### 5.2.1 Schema
 
 The authoritative schema lives in `src/db/schema.sql`. All tables use `CREATE TABLE IF NOT EXISTS` so the init function can run on every startup safely.
 
@@ -302,7 +318,7 @@ CREATE TABLE IF NOT EXISTS cve_references (
 );
 ```
 
-#### 6.2.2 Key Design Decisions
+#### 5.2.2 Key Design Decisions
 
 - **CVE as spine:** Every record ultimately links back to a `cve_id`. This is the universal join key across all sources.
 - **Multi-source merging:** The `raw_sources` array on `vulnerabilities` tracks which feeds contributed data. Sub-tables (`affected_packages`, `exploits`) track source per row with unique constraints to prevent duplicates.
@@ -313,11 +329,11 @@ CREATE TABLE IF NOT EXISTS cve_references (
 
 ---
 
-### 6.3 Web Crawler & Vector Embeddings — Phase 1.5
+### 5.3 Web Crawler & Vector Embeddings — Phase 1.5
 
 This section is **not part of Phase 1**. It documents the design for Phase 1.5, which adds semantic search capability on top of the structured data pipeline.
 
-#### 6.3.1 Why Phase 1.5 and Not Phase 1
+#### 5.3.1 Why Phase 1.5 and Not Phase 1
 
 In Phase 1, the data we ingest is highly structured: CVE IDs, CVSS scores, version ranges, severity levels, ecosystems. An LLM can parse a user's question into SQL filters that query this data precisely. Embedding one-line CVE descriptions into a vector store adds marginal value — the descriptions are formulaic and short ("Buffer overflow in libfoo allows remote code execution").
 
@@ -325,7 +341,7 @@ The vector store becomes valuable when there is **rich, unstructured prose** to 
 
 **The crawler creates the content that makes vector search valuable.** Therefore, vector embeddings follow the crawler, not the other way around.
 
-#### 6.3.2 Web Crawler
+#### 5.3.2 Web Crawler
 
 The crawler enriches existing CVE records by fetching content from reference URLs already stored in `cve_references`.
 
@@ -357,7 +373,7 @@ CREATE TABLE IF NOT EXISTS crawled_content (
 );
 ```
 
-#### 6.3.3 LLM Summarization (Summarize-then-Embed)
+#### 5.3.3 LLM Summarization (Summarize-then-Embed)
 
 Raw crawled content is noisy — boilerplate, navigation remnants, tangential paragraphs. ProveRAG's research found that **LLM-based summarization significantly outperforms raw chunking** for vulnerability data (30%+ improvement in mitigation accuracy over traditional chunk-and-embed RAG). We adopt this finding.
 
@@ -405,7 +421,7 @@ CREATE TABLE IF NOT EXISTS crawled_content (
 );
 ```
 
-#### 6.3.4 Vector Embeddings (pgvector)
+#### 5.3.4 Vector Embeddings (pgvector)
 
 Once summaries exist, they are embedded into pgvector.
 
@@ -461,9 +477,9 @@ Re-crawling: when a page's content changes (detected by content hash), `raw_cont
 
 ---
 
-### 6.4 Query Engine
+### 5.4 Query Engine
 
-#### 6.4.1 Phase 1 — SQL-Based Query Flow
+#### 5.4.1 Phase 1 — SQL-Based Query Flow
 
 In Phase 1, all retrieval is SQL-based. The LLM's role is to parse intent, synthesize answers, and verify its own output.
 
@@ -503,7 +519,7 @@ User Question
 
 This works well for Phase 1 because vulnerability data is inherently structured. Questions like "Is Flask 2.0.1 vulnerable to anything critical?" decompose cleanly into SQL: filter `affected_packages` by ecosystem/name, JOIN to `vulnerabilities` WHERE severity = 'CRITICAL'. No embeddings needed.
 
-#### 6.4.2 Phase 1.5 — Adding Semantic Search
+#### 5.4.2 Phase 1.5 — Adding Semantic Search
 
 Once the web crawler (Section 6.3) populates `crawled_content` and `embeddings`, a second retrieval path is added:
 
@@ -544,7 +560,7 @@ User Question
 
 The semantic path handles queries that don't decompose into SQL filters: "What vulnerabilities involve authentication bypass in web frameworks?" has no clean column to filter on — it needs similarity search over advisory prose.
 
-#### 6.4.3 Intent Parsing
+#### 5.4.3 Intent Parsing
 
 Before searching, the user's question is passed through an LLM call (lightweight model — e.g., `gpt-4.1-mini`) with a structured output schema:
 
@@ -561,7 +577,7 @@ class QueryIntent(BaseModel):
 
 In Phase 1, only the structured fields are used. `raw_search_query` is generated but ignored until Phase 1.5 adds the vector path.
 
-#### 6.4.4 Retrieval Strategy
+#### 5.4.4 Retrieval Strategy
 
 **Phase 1 (SQL only):**
 
@@ -573,7 +589,7 @@ If the intent parser extracts specific packages, CVE IDs, ecosystems, severity l
 2. **Semantic path:** Embed `raw_search_query`, run filtered cosine similarity against `embeddings` table. Filters applied via SQL WHERE/JOIN on `vulnerabilities` columns. Top-k = 10.
 3. **Merge:** Combine both result sets, deduplicate by `cve_id`, rank by relevance weighted by severity signals (EPSS, KEV, exploit availability).
 
-#### 6.4.5 Context Assembly
+#### 5.4.5 Context Assembly
 
 Format each retrieved CVE as a structured text block:
 
@@ -587,7 +603,7 @@ Sources: https://nvd.nist.gov/vuln/detail/CVE-2025-1234
 - Total context budget: ~15,000 tokens of retrieved content (leaving room for system prompt + user question + response). The larger budget accommodates Phase 1.5 semantic search results (crawled articles, exploit write-ups) alongside structured CVE blocks.
 - If over budget, prioritize by: KEV status > has-exploit > EPSS score > CVSS score > recency.
 
-#### 6.4.6 LLM Synthesis
+#### 5.4.6 LLM Synthesis
 
 - **Model:** Configurable (e.g., GPT-5.2, Claude Sonnet).
 - **System prompt** instructs the model to:
@@ -598,7 +614,7 @@ Sources: https://nvd.nist.gov/vuln/detail/CVE-2025-1234
   - Flag exploit maturity clearly ("a public PoC exists," "actively exploited per CISA").
 - **Temperature:** 0.1 (factual, low creativity).
 
-#### 6.4.7 Verification (Self-Critique)
+#### 5.4.7 Verification (Self-Critique)
 
 Inspired by [ProveRAG](https://arxiv.org/abs/2410.17406) (Fayyazi et al., 2024), the query engine includes a verification pass after synthesis. ProveRAG demonstrated that LLM self-critique with provenance tracking achieves 99% accuracy on exploitation strategies and 97% on mitigation — significantly outperforming unverified generation.
 
@@ -638,7 +654,7 @@ class VerificationResult(BaseModel):
 
 The final output shown to the user is the synthesis response with unsupported claims removed and omissions appended. If the verifier flags issues, the response is annotated rather than silently modified.
 
-#### 6.4.8 Example Interactions
+#### 5.4.8 Example Interactions
 
 **Query:** "Is Flask 2.0.1 vulnerable to anything critical?"
 
@@ -670,11 +686,11 @@ The final output shown to the user is the synthesis response with unsupported cl
 
 ---
 
-### 6.5 CLI Interface
+### 5.5 CLI Interface
 
 Phase 1 provides a command-line interface for interacting with the system.
 
-#### 6.5.1 Commands
+#### 5.5.1 Commands
 
 ```bash
 # Start the ingestion service (runs continuously with scheduler)
@@ -697,15 +713,16 @@ threatwarden query "Is Flask 2.0.1 affected by any critical CVEs?"
 threatwarden db stats
 ```
 
-#### 6.5.2 Implementation
+#### 5.5.2 Implementation
 
 - Built with **Typer** (type-annotated CLI framework).
-- Chat mode uses a simple REPL loop with readline support.
+- Chat mode uses **prompt-toolkit** for input handling (multiline paste support, `\`+Enter for manual newlines, history).
+- Loading spinner shown while the query pipeline runs.
 - Output formatted with **Rich** (tables, colored severity badges, markdown rendering in terminal).
 
 ---
 
-## 7. Tech Stack
+## 6. Tech Stack
 
 ### Phase 1
 
@@ -718,7 +735,7 @@ threatwarden db stats
 | LLM (Intent) | gpt-4.1-mini | Lightweight model for parsing user questions into SQL filters. |
 | LLM (Synthesis) | Configurable (GPT-5.2, Claude Sonnet, etc.) | Strong instruction following, good at synthesis with citations. |
 | Scheduler | asyncio (TaskGroup) | Plain async tasks with sleep intervals. No external dependency needed. |
-| CLI | Typer + Rich | Clean CLI with type hints, beautiful terminal output. |
+| CLI | Typer + Rich + prompt-toolkit | Clean CLI with type hints, beautiful terminal output, multiline input support. |
 | Config | `os.getenv` + python-dotenv | Simple env var loading from `.env` file. |
 | Containerization | Docker + Docker Compose | Postgres + ThreatWarden service in one `docker compose up`. |
 
@@ -734,7 +751,7 @@ threatwarden db stats
 
 ---
 
-## 8. Project Structure
+## 7. Project Structure
 
 ```
 ThreatWarden/
@@ -761,8 +778,8 @@ ThreatWarden/
 │   │   ├── github.py           # GitHub Advisory REST API ingestor
 │   │   ├── exploitdb.py        # Exploit-DB ingestor
 │   │   ├── osv.py              # OSV.dev ingestor
-│   │   ├── cisa_kev.py         # CISA KEV ingestor (stub)
-│   │   └── epss.py             # EPSS ingestor (stub)
+│   │   ├── cisa_kev.py         # CISA KEV ingestor
+│   │   └── epss.py             # EPSS ingestor
 │   └── querying/
 │       ├── intent_parser.py    # Intent parsing (LLM structured output → SQL filters)
 │       ├── retriever.py        # SQL query builder from parsed intent
@@ -786,7 +803,9 @@ ThreatWarden/
     │   ├── test_nvd.py         # NVD ingestor tests
     │   ├── test_github.py      # GitHub ingestor tests
     │   ├── test_exploitdb.py   # Exploit-DB ingestor tests
-    │   └── test_osv.py         # OSV ingestor tests
+    │   ├── test_osv.py         # OSV ingestor tests
+    │   ├── test_cisa_kev.py    # CISA KEV ingestor tests
+    │   └── test_epss.py        # EPSS ingestor tests
     └── test_querying/
         ├── test_intent_parser.py
         ├── test_retriever.py
@@ -798,7 +817,7 @@ ThreatWarden/
 
 ---
 
-## 9. Configuration
+## 8. Configuration
 
 All configuration is managed through environment variables, loaded via `python-dotenv` from a `.env` file for local development.
 
@@ -822,7 +841,7 @@ NVD_API_KEY=...
 GITHUB_TOKEN=ghp_...
 
 # Scheduling (interval in seconds)
-FAST_INTERVAL=7200      # NVD + GitHub: every 2 hours
+FAST_INTERVAL=21600      # NVD + GitHub + OSV: every 6 hours
 DAILY_INTERVAL=86400    # CISA KEV + EPSS + Exploit-DB: daily
 
 # Logging
@@ -838,7 +857,7 @@ LOG_LEVEL=INFO
 
 ---
 
-## 10. Deployment (Local Development)
+## 9. Deployment (Local Development)
 
 Phase 1 runs entirely locally via Docker Compose for Postgres and the host for the ThreatWarden process.
 
@@ -862,19 +881,89 @@ volumes:
 
 Phase 1 uses the standard `postgres:16` image. For Phase 1.5, we'll swap to `pgvector/pgvector:pg16` to enable the pgvector extension for semantic search.
 
-The ThreatWarden scheduler runs on the host during development:
+### 9.1 Setup
+
+```bash
+# 1. Clone and create virtual environment
+git clone https://github.com/your-username/ThreatWarden.git
+cd ThreatWarden
+python -m venv .venv
+
+# 2. Activate (Windows)
+.venv\Scripts\activate
+# or (macOS/Linux)
+source .venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Configure environment
+cp .env.example .env
+# Edit .env with your API keys (OPENAI_API_KEY is required; NVD_API_KEY and GITHUB_TOKEN are recommended)
+
+# 5. Start PostgreSQL
+docker compose up -d
+```
+
+### 9.2 Running the Ingestion Service
+
+The scheduler runs on the host and manages all ingestors concurrently:
 
 ```bash
 cd src && python scheduler.py
 ```
 
-The `init_schema` function runs on startup and creates all tables if they don't exist.
+The `init_schema` function runs on startup and creates all tables if they don't exist. On first run, each ingestor performs a full historical sync (NVD: ~250K CVEs, EPSS: ~300K scores). Subsequent runs only fetch updates since the last checkpoint.
+
+Alternatively, use the CLI for more control:
+
+```bash
+cd src
+
+# Start the continuous scheduler via CLI
+python -m cli.main ingest start
+
+# Or trigger a one-shot sync for a specific source
+python -m cli.main ingest sync --source nvd
+python -m cli.main ingest sync --all
+
+# Check sync status
+python -m cli.main ingest status
+```
+
+### 9.3 Using the Query Interface
+
+Once data has been ingested, you can query it:
+
+```bash
+cd src
+
+# Interactive chat session
+python -m cli.main chat
+
+# One-shot query
+python -m cli.main query "Is Flask 2.0.1 affected by any critical CVEs?"
+
+# With debug info (shows parsed intent, row count, verification stats)
+python -m cli.main query -v "Any npm vulnerabilities this week?"
+```
+
+The chat REPL supports multiline paste and shows a loading spinner while the query pipeline runs. Press **Enter** to submit, or type `\` then **Enter** to insert a new line.
+
+### 9.4 Database Inspection
+
+```bash
+cd src
+python -m cli.main db stats
+```
+
+This shows total CVE count, severity breakdown, source distribution, and package coverage.
 
 ---
 
-## 11. Data Flow — End to End
+## 10. Data Flow — End to End
 
-### 11.1 Ingestion (write path — Phase 1)
+### 10.1 Ingestion (write path — Phase 1)
 
 1. Scheduler's asyncio task wakes an ingestor after its sleep interval.
 2. **Read phase:** Acquire connection, read high-water mark from `sync_metadata`, release connection.
@@ -890,7 +979,7 @@ The `init_schema` function runs on startup and creates all tables if they don't 
 
 If a batch fails mid-write, that batch's transaction rolls back but previously committed batches are retained. The high-water mark is not updated, so the next cycle re-fetches the same window and re-processes all records. Upserts are idempotent, so re-processing already-committed records is safe. Because fetching and writing are interleaved, a crash during a large sync (e.g., NVD's ~250K CVEs) preserves all batches committed before the failure, and memory usage stays bounded regardless of total record count.
 
-### 11.2 Enrichment (write path — Phase 1.5)
+### 10.2 Enrichment (write path — Phase 1.5)
 
 Three independent stages, each using the database as a work queue:
 
@@ -914,7 +1003,7 @@ Three independent stages, each using the database as a work queue:
 
 Each stage fails independently. If OpenAI is down, crawling still runs. If crawling is slow, previously-crawled content still gets summarized and embedded. A crashed process resumes cleanly — the work queue is just a SQL query.
 
-### 11.3 Query (read path — Phase 1)
+### 10.3 Query (read path — Phase 1)
 
 1. User enters a question via CLI (`threatwarden chat` or `threatwarden query`).
 2. Intent parser (LLM call) extracts structured filters from natural language.
@@ -925,7 +1014,7 @@ Each stage fails independently. If OpenAI is down, crawling still runs. If crawl
 7. **Verification:** Lightweight LLM call checks each claim in the response against the assembled context. Unsupported claims are flagged; omissions are appended.
 8. Final response streamed to terminal with Rich formatting (colored severity, clickable links).
 
-### 11.4 Query (read path — Phase 1.5 additions)
+### 10.4 Query (read path — Phase 1.5 additions)
 
 Steps 1-4 remain the same. After the SQL path:
 
@@ -935,76 +1024,123 @@ Steps 1-4 remain the same. After the SQL path:
 
 ---
 
-## 12. Success Metrics
+## 11. Example: Scanning a package.json
 
-### Phase 1
+Below is a real interaction from the ThreatWarden chat interface. The user pastes a `package.json` dependency block and asks the system to identify vulnerabilities and explain how they're exploited.
 
-| Metric | Target |
-|---|---|
-| Sources ingesting without error | >= 4 of 6 sources running on schedule |
-| CVE coverage | >= 50,000 CVEs in database after initial sync |
-| Ingestion freshness | New CVEs appear within 4 hours of NVD publication |
-| Query response time | < 10 seconds end-to-end (including verification) |
-| Answer grounding | 100% of cited CVE IDs exist in the database (enforced by verification) |
-| Verification catch rate | 0 unsupported claims reach the user in verified responses |
-| Basic accuracy | Correct package/version matching for top 2 ecosystems (pypi, npm) |
+```
+> Extract the dependencies and their versions from this and find out if any of
+… them have vulnerabilities. I any of them do, figure out how they're exploited
+…
+… "dependencies": {
+…     "@react-three/drei": "^9.88.11",
+…     "@react-three/fiber": "^8.15.11",
+…     "@vercel/analytics": "^1.5.0",
+…     "framer-motion": "^10.16.5",
+…     "lucide-react": "^0.292.0",
+…     "next": "14.2.0",
+…     "next-themes": "^0.2.1",
+…     "react": "^18.2.0",
+…     "react-dom": "^18.2.0",
+…     "react-intersection-observer": "^9.5.3",
+…     "three": "^0.160.0"
+… },
+… "devDependencies": {
+…     "@types/node": "^20.10.0",
+…     "@types/react": "^18.2.39",
+…     "@types/react-dom": "^18.2.17",
+…     "@types/three": "^0.160.0",
+…     "autoprefixer": "^10.4.16",
+…     "eslint": "^8.56.0",
+…     "eslint-config-next": "14.2.0",
+…     "postcss": "^8.4.31",
+…     "tailwindcss": "^3.3.6",
+…     "typescript": "^5.3.2"
+… }
 
-### Phase 1.5
+⠋ Thinking...
 
-| Metric | Target |
-|---|---|
-| Crawled coverage | >= 50% of reference URLs in `cve_references` successfully crawled |
-| Summarization rate | >= 90% of crawled pages produce a non-trivial summary |
-| Embedding coverage | All summarized CVEs have corresponding embeddings |
-| Semantic query improvement | Queries that returned no/poor results via SQL alone return relevant results via vector search |
+╭──────────────────────────────────── ThreatWarden ────────────────────────────────────╮
+│                                                                                      │
+│  Vulnerabilities found in the provided context (matching your deps)                  │
+│                                                                                      │
+│  1) Next.js (next 14.2.0) — multiple CVEs apply                                     │
+│                                                                                      │
+│  Your version 14.2.0 is below several fixed versions, so it is affected by:         │
+│                                                                                      │
+│  • CVE-2025-29927 (CRITICAL, CVSS 9.1) – Authorization bypass when authorization    │
+│    checks occur in middleware.                                                        │
+│    • How it's exploited: An attacker can bypass authorization checks in a Next.js    │
+│      app if the authorization check occurs in middleware.                             │
+│    • Fix: upgrade next to 14.2.25+                                                   │
+│    • Workaround: block external requests containing the x-middleware-subrequest      │
+│      header from reaching the app.                                                   │
+│                                                                                      │
+│  • CVE-2024-51479 (HIGH, CVSS 7.5) – Middleware pathname-based authorization        │
+│    bypass for pages directly under root.                                              │
+│    • How it's exploited: If your middleware authorization is based on pathname, it    │
+│      can be bypassed for routes like /foo (but not / or /foo/bar).                   │
+│    • Fix: upgrade next to 14.2.15+                                                   │
+│                                                                                      │
+│  • CVE-2024-47831 (HIGH, CVSS 7.5) – Image optimization DoS via excessive CPU       │
+│    consumption.                                                                       │
+│    • How it's exploited: Abuse of the image optimization feature causes excessive    │
+│      CPU consumption leading to DoS.                                                  │
+│    • Fix: upgrade next to 14.2.7+                                                    │
+│    • Workaround: set images.unoptimized: true in next.config.js                      │
+│                                                                                      │
+│  • CVE-2024-34351 (HIGH, CVSS 7.5) – SSRF in Server Actions under specific          │
+│    conditions.                                                                        │
+│    • How it's exploited: In self-hosted Next.js using Server Actions, if an          │
+│      attacker can modify the Host header and a Server Action redirects to a          │
+│      relative path starting with /, the attacker may cause requests that appear      │
+│      to originate from the Next.js server (SSRF).                                    │
+│    • Fix: upgrade next to 14.1.1+                                                    │
+│                                                                                      │
+│  • CVE-2024-56332 (MEDIUM, CVSS 5.3) – DoS / "denial of wallet" via hanging         │
+│    Server Actions.                                                                    │
+│    • How it's exploited: Attackers can construct requests that leave Server           │
+│      Actions hanging until the host cancels execution, potentially increasing        │
+│      billed duration on some providers.                                               │
+│    • Fix: upgrade next to 14.2.21+                                                   │
+│                                                                                      │
+│  2) ESLint (eslint ^8.56.0) — 1 CVE                                                 │
+│                                                                                      │
+│  • CVE-2025-50537 (MEDIUM, CVSS 5.5) – Stack overflow via circular references       │
+│    during serialization in RuleTester.                                                │
+│    • How it's exploited: Triggered via RuleTester.run() when a circular reference    │
+│      object is passed; isSerializable() recurses infinitely causing stack overflow.  │
+│    • Fix: upgrade eslint to 9.26.0                                                   │
+│                                                                                      │
+│  No vulnerabilities found for: react, react-dom, three, postcss, tailwindcss,        │
+│  framer-motion, lucide-react, typescript (all at versions above known affected       │
+│  ranges).                                                                             │
+│                                                                                      │
+│  Priority actions:                                                                   │
+│  1. Upgrade next to 14.2.25+ (covers the critical auth bypass and all listed         │
+│     issues).                                                                          │
+│  2. If you cannot immediately patch CVE-2025-29927, block requests with              │
+│     x-middleware-subrequest from reaching the app.                                    │
+│  3. Upgrade eslint to 9.26.0 to remediate CVE-2025-50537.                            │
+│                                                                                      │
+│  ────────────────────────────────────────────────────────────────────────────────     │
+│  Note: The following claims could not be verified against the retrieved data:         │
+│  • The recommended upgrade target of 14.2.32 (the highest 14.2.x fixed versions     │
+│    mentioned in context are 14.2.31 and 14.2.26).                                    │
+│                                                                                      │
+│  Additional information from the retrieved data that may be relevant:                │
+│  • CVE-2025-57822 (SSRF via next() without request object, fixed in 14.2.32)        │
+│  • CVE-2025-30218 (x-middleware-subrequest-id leakage, fixed in 14.2.26)            │
+│  • CVE-2025-55173 (content injection in Image Optimization, fixed in 14.2.31)       │
+│  • CVE-2025-48068 (limited source code exposure in dev server, fixed in 14.2.30)    │
+│  • CVE-2025-32421 (race condition in Pages Router, fixed in 14.2.24)                │
+│  • + several additional medium/low severity Next.js CVEs                              │
+╰──────────────────────────────────────────────────────────────────────────────────────╯
+```
 
 ---
 
-## 13. Risks & Mitigations
-
-| Risk | Phase | Impact | Mitigation |
-|---|---|---|---|
-| NVD API rate limiting / downtime | 1 | Stale data | Use API key (higher limits), implement backoff, fall back to GitHub Advisory and OSV data. |
-| LLM hallucination in synthesis | 1 | Users act on fabricated info | Verification step catches unsupported claims before user sees them. All cited CVE IDs validated against context. |
-| Version range matching is complex | 1 | False positives/negatives in package matching | Use established semver parsing libraries (`packaging` for pypi, `semver` for npm). OSV.dev provides machine-readable ranges as supplement. |
-| Initial NVD sync is massive (~250K CVEs) | 1 | Long first-run, memory pressure | Stream processing — don't load all into memory. Process in pages of 2,000. Use NVD's bulk download for initial seed. |
-| Verification adds latency | 1 | Slower query response | Verification uses the lightweight model (gpt-4.1-mini). Input is small (context + response). Expect <1s overhead. Can be made optional via flag. |
-| OpenAI API cost at scale | 1.5 | High summarization + embedding cost | Summarize-then-embed reduces vector count vs. raw chunking. Use gpt-4.1-mini for summaries (cheap). Phase 1 has no embedding cost — only intent + synthesis + verification. |
-| Crawled content quality varies | 1.5 | Poor summaries, noisy retrieval | LLM summarization filters noise before embedding. Domain allowlist as additional guard. |
-| Scope creep into SAST / code scanning | 1 | Phase 1 never ships | Hard boundary: Phase 1 is data pipeline + query only. No codebase scanning. |
-| Phase 1.5 before Phase 1 is solid | 1.5 | Premature complexity | Phase 1 must be feature-complete and stable before starting crawler/embeddings work. |
-
----
-
-## 14. Open Questions
-
-### Phase 1
-
-1. **Semver matching fidelity?** GitHub Advisory provides version ranges, but matching a user-supplied version against those ranges requires per-ecosystem logic (pypi uses PEP 440, npm uses node-semver, Go uses its own scheme). OSV.dev's standardized format may help. Start with pypi + npm; expand ecosystem coverage iteratively.
-
-2. ~~**Initial NVD sync batching?**~~ **Resolved.** The streaming ingestion refactor (async generator + buffered writes) means records are fetched, normalized, and written in interleaved batches of 2,000. Memory usage stays bounded regardless of total record count, and partial progress is persisted even if the sync is interrupted.
-
-3. **SQL query generation robustness?** The intent parser must produce valid SQL filters. Need guardrails against malformed output (validate extracted fields before building queries, use parameterized queries exclusively).
-
-4. **Verification granularity?** The self-critique step could operate at different levels — per-response (coarse, cheap) or per-claim (fine, more LLM tokens). Start with per-response and evaluate whether per-claim granularity is worth the additional cost.
-
-### Phase 1.5
-
-5. **Local embedding model vs. OpenAI?** Using OpenAI is simpler to start, but for a security tool, sending vulnerability context to an external API may be a concern. Evaluate `nomic-embed-text` via Ollama as an alternative.
-
-6. **Crawl scope and domain allowlist?** Which domains are worth crawling? Vendor advisories are high-signal, but random blog posts may introduce noise. Need a curated domain allowlist or quality heuristic.
-
-7. **Summarization quality threshold?** When the LLM summary is too short or vague (e.g., page had no vulnerability-relevant content), should we still embed it? Need a minimum-quality gate before embedding.
-
-### General
-
-8. **Hosting for Phase 2?** Phase 1 is local-only. If this grows, evaluate Railway, Fly.io, or a small VPS for running the ingestion service 24/7.
-
-
-
----
-
-## 15. Future Work
+## 12. Future Work
 
 ### Phase 1.5 — Crawler, Summarization & Semantic Search
 
