@@ -28,7 +28,7 @@ class NVDIngestor(Ingestor):
     def source_name(self) -> str:
         return "nvd"
 
-    async def fetch_updates(self, since: datetime | None) -> list[RawVulnerability]:
+    async def fetch_updates(self, since: datetime | None):
         headers = {}
         if self.api_key:
             headers["apiKey"] = self.api_key
@@ -37,7 +37,6 @@ class NVDIngestor(Ingestor):
             now = datetime.now(timezone.utc)
             params["lastModStartDate"] = since.strftime(self.date_format)
             params["lastModEndDate"] = now.strftime(self.date_format)
-        results: list[RawVulnerability] = []
         start_idx = 0
         async with httpx.AsyncClient(timeout=60.0) as client:
             while True:
@@ -46,17 +45,19 @@ class NVDIngestor(Ingestor):
                     client, self.base_url, headers=headers, params=params,
                 )
                 data = response.json()
+                page = []
                 for item in data.get("vulnerabilities", []):
                     cve = item.get("cve", {})
                     cve_id = cve.get("id", "")
                     if cve_id:
-                        results.append(RawVulnerability(cve_id, self.source_name(), cve))
+                        page.append(RawVulnerability(cve_id, self.source_name(), cve))
+                if page:
+                    yield page
                 total = data.get("totalResults", 0)
                 start_idx += len(data.get("vulnerabilities", []))
                 if start_idx >= total:
                     break
                 await asyncio.sleep(self.request_delay)
-        return results
 
     def _normalize(self, raw: dict[str, Any]) -> NormalizedVulnerability:
         descriptions = raw.get("descriptions", [])

@@ -9,6 +9,13 @@ from ingestion.github import GithubIngestor, parse_next_url
 _REQ = httpx.Request("GET", "https://test.example.com")
 
 
+async def _collect(gen):
+    results = []
+    async for page in gen:
+        results.extend(page)
+    return results
+
+
 # ── Sample data ───────────────────────────────────────────────────────────
 
 _ADVISORY_FULL = {
@@ -95,7 +102,7 @@ async def test_fetch_full_sync():
         patch("ingestion.github.get_response_with_retry", new_callable=AsyncMock, return_value=resp),
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
-        results = await GithubIngestor().fetch_updates(since=None)
+        results = await _collect(GithubIngestor().fetch_updates(since=None))
 
     assert len(results) == 2
     assert results[0].cve_id == "CVE-2025-5678"
@@ -110,7 +117,8 @@ async def test_fetch_incremental_adds_modified_param():
         patch("ingestion.github.get_response_with_retry", new_callable=AsyncMock, return_value=resp) as mock_get,
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
-        await GithubIngestor().fetch_updates(since=since)
+        async for _ in GithubIngestor().fetch_updates(since=since):
+            pass
 
     _, kwargs = mock_get.call_args
     params = kwargs["params"]
@@ -129,7 +137,7 @@ async def test_fetch_pagination_follows_link_header():
         patch("ingestion.github.get_response_with_retry", new_callable=AsyncMock, side_effect=[page1, page2]),
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
-        results = await GithubIngestor().fetch_updates(since=None)
+        results = await _collect(GithubIngestor().fetch_updates(since=None))
 
     assert len(results) == 2
     assert results[1].cve_id == "CVE-2025-0002"
@@ -146,7 +154,7 @@ async def test_fetch_skips_advisories_without_cve_id():
         patch("ingestion.github.get_response_with_retry", new_callable=AsyncMock, return_value=resp),
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
-        results = await GithubIngestor().fetch_updates(since=None)
+        results = await _collect(GithubIngestor().fetch_updates(since=None))
 
     assert len(results) == 1
 
@@ -231,6 +239,7 @@ def test_normalize_severity_unknown_treated_as_none():
 def test_normalize_description_prefers_description_over_summary():
     result = GithubIngestor()._normalize(_ADVISORY_FULL)
 
+    assert result.description is not None
     assert "critical vulnerability" in result.description.lower()
 
 

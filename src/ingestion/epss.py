@@ -1,6 +1,7 @@
 import csv
 import gzip
 import io
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
 
@@ -22,7 +23,7 @@ class EPSSIngestor(Ingestor):
     def source_name(self) -> str:
         return "epss"
 
-    async def fetch_updates(self, since: datetime | None) -> list[RawVulnerability]:
+    async def fetch_updates(self, since: datetime | None) -> AsyncIterator[list[RawVulnerability]]:
         async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
             response = await get_response_with_retry(client, _EPSS_URL, headers={})
 
@@ -31,15 +32,21 @@ class EPSSIngestor(Ingestor):
         lines = [ln for ln in text.splitlines() if not ln.startswith("#")]
         reader = csv.DictReader(lines)
 
-        return [
-            RawVulnerability(
-                cve_id=row["cve"],
-                source=self.source_name(),
-                raw_data=row,
-            )
-            for row in reader
-            if row.get("cve")
-        ]
+        page: list[RawVulnerability] = []
+        for row in reader:
+            if row.get("cve"):
+                page.append(
+                    RawVulnerability(
+                        cve_id=row["cve"],
+                        source=self.source_name(),
+                        raw_data=row,
+                    )
+                )
+                if len(page) >= 5000:
+                    yield page
+                    page = []
+        if page:
+            yield page
 
     def _normalize(self, raw: dict[str, Any]) -> NormalizedVulnerability:
         cve_id = raw["cve"]

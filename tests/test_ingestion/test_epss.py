@@ -7,6 +7,14 @@ from ingestion.epss import EPSSIngestor
 
 _REQ = httpx.Request("GET", "https://test.example.com")
 
+
+async def _collect(gen):
+    results = []
+    async for page in gen:
+        results.extend(page)
+    return results
+
+
 _CSV_LINES = [
     "#model_version:v2023.03.01,score_date:2025-01-20T00:00:00+0000",
     "cve,epss,percentile",
@@ -36,7 +44,7 @@ async def test_fetch_parses_all_csv_records():
     resp = _epss_response()
 
     with patch("ingestion.epss.get_response_with_retry", new_callable=AsyncMock, return_value=resp):
-        results = await EPSSIngestor().fetch_updates(since=None)
+        results = await _collect(EPSSIngestor().fetch_updates(since=None))
 
     assert len(results) == 3
     cve_ids = {r.cve_id for r in results}
@@ -53,7 +61,7 @@ async def test_fetch_skips_comment_lines():
     resp = _epss_response(lines)
 
     with patch("ingestion.epss.get_response_with_retry", new_callable=AsyncMock, return_value=resp):
-        results = await EPSSIngestor().fetch_updates(since=None)
+        results = await _collect(EPSSIngestor().fetch_updates(since=None))
 
     assert len(results) == 1
     assert results[0].cve_id == "CVE-2025-1111"
@@ -68,7 +76,7 @@ async def test_fetch_skips_rows_without_cve():
     resp = _epss_response(lines)
 
     with patch("ingestion.epss.get_response_with_retry", new_callable=AsyncMock, return_value=resp):
-        results = await EPSSIngestor().fetch_updates(since=None)
+        results = await _collect(EPSSIngestor().fetch_updates(since=None))
 
     assert len(results) == 1
     assert results[0].cve_id == "CVE-2025-1111"
@@ -78,7 +86,7 @@ async def test_fetch_preserves_raw_data():
     resp = _epss_response()
 
     with patch("ingestion.epss.get_response_with_retry", new_callable=AsyncMock, return_value=resp):
-        results = await EPSSIngestor().fetch_updates(since=None)
+        results = await _collect(EPSSIngestor().fetch_updates(since=None))
 
     first = next(r for r in results if r.cve_id == "CVE-2025-1111")
     assert first.raw_data["epss"] == "0.97565"
@@ -93,7 +101,7 @@ async def test_fetch_returns_empty_for_no_data_rows():
     resp = _epss_response(lines)
 
     with patch("ingestion.epss.get_response_with_retry", new_callable=AsyncMock, return_value=resp):
-        results = await EPSSIngestor().fetch_updates(since=None)
+        results = await _collect(EPSSIngestor().fetch_updates(since=None))
 
     assert results == []
 
@@ -106,7 +114,7 @@ async def test_fetch_ignores_since_and_returns_full_snapshot():
     since = datetime(2099, 1, 1, tzinfo=timezone.utc)
 
     with patch("ingestion.epss.get_response_with_retry", new_callable=AsyncMock, return_value=resp):
-        results = await EPSSIngestor().fetch_updates(since=since)
+        results = await _collect(EPSSIngestor().fetch_updates(since=since))
 
     assert len(results) == 3
 

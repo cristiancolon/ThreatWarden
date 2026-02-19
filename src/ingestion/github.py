@@ -31,7 +31,7 @@ class GithubIngestor(Ingestor):
     def source_name(self) -> str:
         return "github"
 
-    async def fetch_updates(self, since: datetime | None) -> list[RawVulnerability]:
+    async def fetch_updates(self, since: datetime | None):
         headers = {"Accept": "application/vnd.github+json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
@@ -44,7 +44,6 @@ class GithubIngestor(Ingestor):
             since_str = since.strftime(self.date_format)
             params["modified"] = f"{since_str}..*"
 
-        results: list[RawVulnerability] = []
         url: str | None = self.base_url
 
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -52,17 +51,19 @@ class GithubIngestor(Ingestor):
                 response = await get_response_with_retry(
                     client, url, headers=headers, params=params,
                 )
+                page = []
                 for advisory in response.json():
                     cve_id = advisory.get("cve_id")
                     if cve_id:
-                        results.append(RawVulnerability(cve_id, self.source_name(), advisory))
+                        page.append(RawVulnerability(cve_id, self.source_name(), advisory))
+                if page:
+                    yield page
 
                 url = parse_next_url(response.headers.get("Link"))
                 params = {}
 
                 if url is not None:
                     await asyncio.sleep(self.request_delay)
-        return results
 
     def _normalize(self, raw: dict[str, Any]) -> NormalizedVulnerability:
         # cvss field was removed April 2025; use cvss_severities instead

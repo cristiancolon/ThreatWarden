@@ -11,6 +11,13 @@ from ingestion.osv import OSVIngestor
 _REQ = httpx.Request("GET", "https://test.example.com")
 
 
+async def _collect(gen):
+    results = []
+    async for page in gen:
+        results.extend(page)
+    return results
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
@@ -90,7 +97,7 @@ async def test_fetch_parses_zip_and_extracts_cves():
     mock_client = _mock_client_for(zip_bytes)
 
     with patch("ingestion.osv.httpx.AsyncClient", return_value=mock_client):
-        results = await OSVIngestor(ecosystems=["PyPI"]).fetch_updates(since=None)
+        results = await _collect(OSVIngestor(ecosystems=["PyPI"]).fetch_updates(since=None))
 
     assert len(results) == 1
     assert results[0].cve_id == "CVE-2025-9999"
@@ -107,7 +114,7 @@ async def test_fetch_extracts_cve_from_aliases():
     mock_client = _mock_client_for(zip_bytes)
 
     with patch("ingestion.osv.httpx.AsyncClient", return_value=mock_client):
-        results = await OSVIngestor(ecosystems=["PyPI"]).fetch_updates(since=None)
+        results = await _collect(OSVIngestor(ecosystems=["PyPI"]).fetch_updates(since=None))
 
     cve_ids = {r.cve_id for r in results}
     assert cve_ids == {"CVE-2025-1111", "CVE-2025-2222"}
@@ -123,7 +130,7 @@ async def test_fetch_uses_id_as_cve_when_no_aliases():
     mock_client = _mock_client_for(zip_bytes)
 
     with patch("ingestion.osv.httpx.AsyncClient", return_value=mock_client):
-        results = await OSVIngestor(ecosystems=["PyPI"]).fetch_updates(since=None)
+        results = await _collect(OSVIngestor(ecosystems=["PyPI"]).fetch_updates(since=None))
 
     assert len(results) == 1
     assert results[0].cve_id == "CVE-2025-5555"
@@ -134,7 +141,7 @@ async def test_fetch_skips_records_without_cve():
     mock_client = _mock_client_for(zip_bytes)
 
     with patch("ingestion.osv.httpx.AsyncClient", return_value=mock_client):
-        results = await OSVIngestor(ecosystems=["PyPI"]).fetch_updates(since=None)
+        results = await _collect(OSVIngestor(ecosystems=["PyPI"]).fetch_updates(since=None))
 
     assert results == []
 
@@ -147,7 +154,7 @@ async def test_fetch_filters_by_modified_date():
 
     since = datetime(2025, 1, 1, tzinfo=timezone.utc)
     with patch("ingestion.osv.httpx.AsyncClient", return_value=mock_client):
-        results = await OSVIngestor(ecosystems=["PyPI"]).fetch_updates(since=since)
+        results = await _collect(OSVIngestor(ecosystems=["PyPI"]).fetch_updates(since=since))
 
     assert len(results) == 1
 
@@ -163,7 +170,7 @@ async def test_fetch_skips_non_json_files_in_zip():
     mock_client = _mock_client_for(buf.getvalue())
 
     with patch("ingestion.osv.httpx.AsyncClient", return_value=mock_client):
-        results = await OSVIngestor(ecosystems=["PyPI"]).fetch_updates(since=None)
+        results = await _collect(OSVIngestor(ecosystems=["PyPI"]).fetch_updates(since=None))
 
     assert len(results) == 1
 
@@ -173,7 +180,8 @@ async def test_fetch_queries_each_configured_ecosystem():
     mock_client = _mock_client_for(zip_bytes)
 
     with patch("ingestion.osv.httpx.AsyncClient", return_value=mock_client):
-        await OSVIngestor(ecosystems=["PyPI", "npm"]).fetch_updates(since=None)
+        async for _ in OSVIngestor(ecosystems=["PyPI", "npm"]).fetch_updates(since=None):
+            pass
 
     assert mock_client.get.call_count == 2
     urls = [call.args[0] for call in mock_client.get.call_args_list]
@@ -198,6 +206,7 @@ def test_normalize_version_range_format():
     result = OSVIngestor()._normalize(_OSV_RECORD)
     pkg = result.affected_packages[0]
 
+    assert pkg.vulnerable_versions is not None
     assert ">=1.0.0" in pkg.vulnerable_versions
     assert "<1.5.2" in pkg.vulnerable_versions
 

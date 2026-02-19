@@ -7,6 +7,14 @@ from ingestion.cisa_kev import CISAKEVIngestor
 
 _REQ = httpx.Request("GET", "https://test.example.com")
 
+
+async def _collect(gen):
+    results = []
+    async for page in gen:
+        results.extend(page)
+    return results
+
+
 _CATALOG = {
     "title": "CISA Known Exploited Vulnerabilities Catalog",
     "catalogVersion": "2025.01.10",
@@ -70,7 +78,7 @@ async def test_fetch_returns_all_entries_when_no_since():
     resp = _kev_response()
 
     with patch("ingestion.cisa_kev.get_response_with_retry", new_callable=AsyncMock, return_value=resp):
-        results = await CISAKEVIngestor().fetch_updates(since=None)
+        results = await _collect(CISAKEVIngestor().fetch_updates(since=None))
 
     assert len(results) == 3
     cve_ids = {r.cve_id for r in results}
@@ -82,7 +90,7 @@ async def test_fetch_filters_by_date_added():
     since = datetime(2025, 1, 20, tzinfo=timezone.utc)
 
     with patch("ingestion.cisa_kev.get_response_with_retry", new_callable=AsyncMock, return_value=resp):
-        results = await CISAKEVIngestor().fetch_updates(since=since)
+        results = await _collect(CISAKEVIngestor().fetch_updates(since=since))
 
     cve_ids = {r.cve_id for r in results}
     assert "CVE-2025-1111" not in cve_ids  # dateAdded 2025-01-05, before cutoff
@@ -101,7 +109,7 @@ async def test_fetch_skips_entries_without_cve_id():
     resp = _kev_response(catalog)
 
     with patch("ingestion.cisa_kev.get_response_with_retry", new_callable=AsyncMock, return_value=resp):
-        results = await CISAKEVIngestor().fetch_updates(since=None)
+        results = await _collect(CISAKEVIngestor().fetch_updates(since=None))
 
     assert len(results) == 1
     assert results[0].cve_id == "CVE-2025-9999"
@@ -118,7 +126,7 @@ async def test_fetch_keeps_entry_with_unparseable_date_when_since_set():
     since = datetime(2025, 6, 1, tzinfo=timezone.utc)
 
     with patch("ingestion.cisa_kev.get_response_with_retry", new_callable=AsyncMock, return_value=resp):
-        results = await CISAKEVIngestor().fetch_updates(since=since)
+        results = await _collect(CISAKEVIngestor().fetch_updates(since=since))
 
     assert len(results) == 1
 
@@ -127,7 +135,7 @@ async def test_fetch_returns_empty_for_empty_catalog():
     resp = _kev_response({"vulnerabilities": []})
 
     with patch("ingestion.cisa_kev.get_response_with_retry", new_callable=AsyncMock, return_value=resp):
-        results = await CISAKEVIngestor().fetch_updates(since=None)
+        results = await _collect(CISAKEVIngestor().fetch_updates(since=None))
 
     assert results == []
 

@@ -79,12 +79,12 @@ async def test_exponential_backoff_delays():
 
 async def test_raises_immediately_on_non_retryable_error():
     client = AsyncMock(spec=httpx.AsyncClient)
-    client.get = AsyncMock(return_value=_resp(403))
+    client.get = AsyncMock(return_value=_resp(404))
 
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
         await get_response_with_retry(client, "https://x", headers={})
 
-    assert exc_info.value.response.status_code == 403
+    assert exc_info.value.response.status_code == 404
     client.get.assert_called_once()
 
 

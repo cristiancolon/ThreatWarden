@@ -8,6 +8,13 @@ from ingestion.nvd import NVDIngestor
 _REQ = httpx.Request("GET", "https://test.example.com")
 
 
+async def _collect(gen):
+    results = []
+    async for page in gen:
+        results.extend(page)
+    return results
+
+
 # ── Sample data ───────────────────────────────────────────────────────────
 
 _CVE_FULL = {
@@ -75,7 +82,7 @@ async def test_fetch_full_sync_returns_all_cves():
         patch("ingestion.nvd.get_response_with_retry", new_callable=AsyncMock, return_value=resp),
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
-        results = await NVDIngestor().fetch_updates(since=None)
+        results = await _collect(NVDIngestor().fetch_updates(since=None))
 
     assert len(results) == 2
     assert results[0].cve_id == "CVE-2025-0001"
@@ -91,7 +98,8 @@ async def test_fetch_incremental_passes_date_params():
         patch("ingestion.nvd.get_response_with_retry", new_callable=AsyncMock, return_value=resp) as mock_get,
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
-        await NVDIngestor().fetch_updates(since=since)
+        async for _ in NVDIngestor().fetch_updates(since=since):
+            pass
 
     _, kwargs = mock_get.call_args
     params = kwargs["params"]
@@ -108,7 +116,7 @@ async def test_fetch_paginates_multiple_pages():
         patch("ingestion.nvd.get_response_with_retry", new_callable=AsyncMock, side_effect=[page1, page2]),
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
-        results = await NVDIngestor().fetch_updates(since=None)
+        results = await _collect(NVDIngestor().fetch_updates(since=None))
 
     assert len(results) == 3
     assert results[2].cve_id == "CVE-2025-0003"
@@ -126,7 +134,7 @@ async def test_fetch_skips_entries_without_cve_id():
         patch("ingestion.nvd.get_response_with_retry", new_callable=AsyncMock, return_value=resp),
         patch("asyncio.sleep", new_callable=AsyncMock),
     ):
-        results = await NVDIngestor().fetch_updates(since=None)
+        results = await _collect(NVDIngestor().fetch_updates(since=None))
 
     assert len(results) == 1
 
@@ -144,6 +152,7 @@ def test_normalize_cvss_v31():
 
     assert result.cvss_score == 9.8
     assert result.cvss_version == "3.1"
+    assert result.cvss_vector is not None
     assert result.cvss_vector.startswith("CVSS:3.1/")
     assert result.severity == "CRITICAL"
 

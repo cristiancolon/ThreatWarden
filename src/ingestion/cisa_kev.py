@@ -21,7 +21,7 @@ class CISAKEVIngestor(Ingestor):
     def source_name(self) -> str:
         return "cisa_kev"
 
-    async def fetch_updates(self, since: datetime | None) -> list[RawVulnerability]:
+    async def fetch_updates(self, since: datetime | None):
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
             response = await get_response_with_retry(client, _KEV_URL, headers={})
 
@@ -53,7 +53,8 @@ class CISAKEVIngestor(Ingestor):
                 )
             )
 
-        return results
+        if results:
+            yield results
 
     def _normalize(self, raw: dict[str, Any]) -> NormalizedVulnerability:
         cve_id = raw["cveID"]

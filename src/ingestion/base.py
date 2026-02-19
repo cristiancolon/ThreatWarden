@@ -1,13 +1,16 @@
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import date, datetime
 import asyncio
+import logging
 from typing import Any
 from dotenv import load_dotenv
 import httpx
 
 
 load_dotenv()
+logger = logging.getLogger("threatwarden.http")
 
 @dataclass
 class RawVulnerability:
@@ -62,13 +65,28 @@ async def get_response_with_retry(
         params: dict[str, Any] | None = None,
         max_retries: int = 5,
     ) -> httpx.Response:
-        """Make an HTTP GET request with exponential backoff on 429 / 5xx responses."""
+        """Make an HTTP GET request with exponential backoff on transient errors."""
         delay = 1.0
         last_response = None
         for attempt in range(max_retries):
-            response = await client.get(url, headers=headers, params=params or {})
+            try:
+                response = await client.get(url, headers=headers, params=params or {})
+            except httpx.TransportError:
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        "Transport error on %s (attempt %d/%d), retrying in %.0fs",
+                        url, attempt + 1, max_retries, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                raise
             last_response = response
-            if response.status_code in {429, 500, 502, 503, 504} and attempt < max_retries - 1:
+            if response.status_code in {403, 429, 500, 502, 503, 504} and attempt < max_retries - 1:
+                logger.warning(
+                    "HTTP %d on %s (attempt %d/%d), retrying in %.0fs",
+                    response.status_code, url, attempt + 1, max_retries, delay,
+                )
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue
@@ -80,12 +98,13 @@ async def get_response_with_retry(
 
 class Ingestor(ABC):
     @abstractmethod
-    async def fetch_updates(self, since: datetime | None) -> list[RawVulnerability]:
+    async def fetch_updates(self, since: datetime | None) -> AsyncIterator[list[RawVulnerability]]:
         """
         Fetch new or updated vulnerability records since the given timestamp.
         If `since` is None, perform a full initial sync.
-        Returns a list of normalized intermediate records.
+        Yields pages of raw records as they arrive from the API.
         """
+        yield []  # abstract
     @abstractmethod
     def source_name(self) -> str:
         """

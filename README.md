@@ -164,10 +164,11 @@ Each source is implemented as a single Ingestor class that handles both fetching
 ```python
 class Ingestor(ABC):
     @abstractmethod
-    async def fetch_updates(self, since: datetime | None) -> list[RawVulnerability]:
+    async def fetch_updates(self, since: datetime | None) -> AsyncIterator[list[RawVulnerability]]:
         """
         Fetch new or updated vulnerability records since the given timestamp.
         If `since` is None, perform a full initial sync.
+        Yields pages of raw records as they arrive from the API.
         """
 
     @abstractmethod
@@ -183,7 +184,7 @@ class Ingestor(ABC):
         return [self._normalize(raw) for raw in raw_updates]
 ```
 
-Each ingestor handles its own pagination, rate limiting, retry logic, and normalization. The `_normalize` method is where each source's unique response structure is mapped to the common `NormalizedVulnerability` output. `normalize_updates` is a concrete method on the base class since the iteration logic is identical across all subclasses.
+`fetch_updates` is an async generator that yields pages of raw records as they arrive from the external API. This streaming design means the caller can normalize and persist each page incrementally rather than waiting for the entire fetch to complete before writing anything. Each ingestor handles its own pagination, rate limiting, retry logic, and normalization. The `_normalize` method is where each source's unique response structure is mapped to the common `NormalizedVulnerability` output. `normalize_updates` is a concrete method on the base class since the iteration logic is identical across all subclasses.
 
 Shared utilities (`get_response_with_retry`, data classes) live in `ingestion/base.py`. Source-specific helpers (e.g., GitHub's `parse_next_url`) live in their respective ingestor modules.
 
@@ -214,18 +215,21 @@ All write operations live in `db/writer.py` as stateless functions that take an 
 
 The scheduler uses plain **asyncio** rather than APScheduler. Each ingestor runs as an independent `asyncio` task with its own sleep interval. This eliminates an external dependency for functionality that amounts to "run a function, sleep, repeat."
 
-- Each task: read high-water mark → fetch (HTTP, no DB held) → normalize → write (single transaction) → update high-water mark → sleep.
+- Each task: read high-water mark → apply overlap window → stream pages from API (fetch page → normalize → buffer → write batch when buffer reaches 2,000 → repeat) → flush remaining buffer → update high-water mark → sleep.
+- **Streaming ingestion:** `fetch_updates` is an async generator that yields pages of raw records. The scheduler consumes pages as they arrive, normalizes each page, appends to a buffer, and commits a batch transaction whenever the buffer reaches the write threshold. This interleaves fetching and writing rather than accumulating all records in memory before persisting.
+- **Overlap window:** On subsequent syncs, 1 hour is subtracted from the high-water mark before fetching. This re-fetches a small window of already-seen records (harmless — upserts are idempotent) but catches records that appeared in the API with an indexing delay.
+- **Batched writes:** Records are committed in batches of 2,000, each in its own transaction. This reduces lock contention (prevents deadlocks when multiple ingestors write overlapping CVEs concurrently) and limits transaction duration.
 - Configurable intervals via environment variables (`FAST_INTERVAL`, `DAILY_INTERVAL`).
 - Default schedule: NVD + GitHub every 2 hours, CISA KEV + EPSS + Exploit-DB daily.
 - `asyncio.TaskGroup` runs all tasks concurrently with failure isolation — one source failing does not affect others.
-- On first run, `sync_metadata` returns `None` for the high-water mark, causing `fetch_updates(None)` to perform a full historical sync.
-- Crash recovery is automatic: if a sync fails mid-batch, the transaction rolls back and the high-water mark is not updated, so the next cycle re-fetches the same window. Upserts are idempotent, so re-processing is safe.
+- On first run, `sync_metadata` returns `None` for the high-water mark, causing `fetch_updates(None)` to perform a full historical sync (no overlap applied).
+- Crash recovery is automatic: if a batch fails, previously committed batches are safe and the high-water mark is not updated (it is written in a separate transaction after all batches complete), so the next cycle re-fetches the same window. Upserts are idempotent, so re-processing is safe.
 
 #### 6.1.6 Rate Limiting & Resilience
 
 - NVD: honor 50 requests/30s with API key (5 requests/30s without). Obtain a free API key.
 - GitHub: 5,000 requests/hour with PAT. Use Link header pagination.
-- Exponential backoff with doubling delay on transient failures (HTTP 429, 5xx), implemented in `get_response_with_retry`.
+- Exponential backoff with doubling delay on transient failures (HTTP 403, 429, 5xx) and transport-level errors (connection drops, incomplete reads, timeouts), implemented in `get_response_with_retry`. The 403 retry covers GitHub's non-standard rate limit response code.
 - Each ingestor task catches exceptions, logs them, and continues to the next cycle. A single source failure never blocks other sources.
 
 ---
@@ -874,16 +878,17 @@ The `init_schema` function runs on startup and creates all tables if they don't 
 
 1. Scheduler's asyncio task wakes an ingestor after its sleep interval.
 2. **Read phase:** Acquire connection, read high-water mark from `sync_metadata`, release connection.
-3. **Fetch phase:** Ingestor calls the external API, paginating through results since the checkpoint. No DB connection held during HTTP calls.
-4. **Normalize phase:** `normalize_updates` maps `_normalize` over raw results, producing `NormalizedVulnerability` objects.
-5. **Write phase:** Acquire connection, open transaction:
-   a. For each normalized record, `save_vulnerability` runs `INSERT ... ON CONFLICT` with COALESCE on the `vulnerabilities` table, then upserts sub-records (`affected_packages`, `exploits`, `cve_references`) via `executemany`.
-   b. Update `sync_metadata` with the new high-water mark.
-   c. Commit transaction.
-6. Log summary: "nvd: sync complete (47 records)".
-7. Sleep until next interval.
+3. **Overlap:** If a high-water mark exists, subtract 1 hour to produce `fetch_since`. This catches records that appeared in the API after the previous sync but with timestamps before the checkpoint.
+4. **Stream phase:** The scheduler iterates over the async generator returned by `fetch_updates(fetch_since)`. For each yielded page:
+   a. **Normalize:** `normalize_updates` maps `_normalize` over the page's raw records, producing `NormalizedVulnerability` objects. These are appended to an in-memory buffer.
+   b. **Write batches:** While the buffer contains >= 2,000 records, pop a batch of 2,000, acquire a connection, open a transaction, run `save_vulnerability` (upsert with COALESCE) for each record plus sub-record upserts (`affected_packages`, `exploits`, `cve_references`), commit, release connection.
+   c. The next API page is fetched while previously committed batches are already persisted.
+5. **Flush:** After the generator is exhausted, any remaining records in the buffer (< 2,000) are written in a final transaction.
+6. **High-water mark:** After all records are persisted, update `sync_metadata` in a separate transaction.
+7. Log summary: "nvd: sync complete (47 records)".
+8. Sleep until next interval.
 
-If any step fails, the exception is caught, logged, and the task sleeps until the next cycle. The transaction rolls back, the high-water mark is not updated, and the next run re-fetches the same window safely.
+If a batch fails mid-write, that batch's transaction rolls back but previously committed batches are retained. The high-water mark is not updated, so the next cycle re-fetches the same window and re-processes all records. Upserts are idempotent, so re-processing already-committed records is safe. Because fetching and writing are interleaved, a crash during a large sync (e.g., NVD's ~250K CVEs) preserves all batches committed before the failure, and memory usage stays bounded regardless of total record count.
 
 ### 11.2 Enrichment (write path — Phase 1.5)
 
@@ -977,7 +982,7 @@ Steps 1-4 remain the same. After the SQL path:
 
 1. **Semver matching fidelity?** GitHub Advisory provides version ranges, but matching a user-supplied version against those ranges requires per-ecosystem logic (pypi uses PEP 440, npm uses node-semver, Go uses its own scheme). OSV.dev's standardized format may help. Start with pypi + npm; expand ecosystem coverage iteratively.
 
-2. **Initial NVD sync batching?** The full NVD sync (~250K CVEs) accumulates all records in memory before writing. May need batched writes (process N records at a time) if memory becomes an issue on first run.
+2. ~~**Initial NVD sync batching?**~~ **Resolved.** The streaming ingestion refactor (async generator + buffered writes) means records are fetched, normalized, and written in interleaved batches of 2,000. Memory usage stays bounded regardless of total record count, and partial progress is persisted even if the sync is interrupted.
 
 3. **SQL query generation robustness?** The intent parser must produce valid SQL filters. Need guardrails against malformed output (validate extracted fields before building queries, use parameterized queries exclusively).
 

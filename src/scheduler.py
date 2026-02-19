@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import asyncpg
 from dotenv import load_dotenv
@@ -18,6 +18,9 @@ from ingestion.exploitdb import ExploitDBIngestor
 load_dotenv()
 logger = logging.getLogger("threatwarden.scheduler")
 
+OVERLAP_WINDOW = timedelta(hours=1)
+WRITE_BATCH_SIZE = 2000
+
 
 async def run_ingestor(pool: asyncpg.Pool, ingestor: Ingestor, interval: int) -> None:
     """Run a single ingestor in a loop: fetch → normalize → save → sleep."""
@@ -27,20 +30,41 @@ async def run_ingestor(pool: asyncpg.Pool, ingestor: Ingestor, interval: int) ->
             async with pool.acquire() as conn:
                 since = await get_last_sync(conn, source)
 
-            logger.info("%s: starting sync (since=%s)", source, since)
-            raw = await ingestor.fetch_updates(since)
-            normalized = ingestor.normalize_updates([r.raw_data for r in raw])
-            logger.info("%s: fetched %d records, writing to db", source, len(normalized))
+            fetch_since = since - OVERLAP_WINDOW if since else None
+            logger.info("%s: starting sync (since=%s)", source, fetch_since)
 
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    for vuln in normalized:
-                        await save_vulnerability(conn, vuln)
-                    await update_last_sync(
-                        conn, source, datetime.now(timezone.utc), len(normalized),
+            written = 0
+            buffer: list = []
+
+            async for page in ingestor.fetch_updates(fetch_since):
+                normalized = ingestor.normalize_updates([r.raw_data for r in page])
+                buffer.extend(normalized)
+
+                while len(buffer) >= WRITE_BATCH_SIZE:
+                    batch = buffer[:WRITE_BATCH_SIZE]
+                    buffer = buffer[WRITE_BATCH_SIZE:]
+                    async with pool.acquire() as conn:
+                        async with conn.transaction():
+                            for vuln in batch:
+                                await save_vulnerability(conn, vuln)
+                    written += len(batch)
+                    logger.info(
+                        "%s: wrote batch (%d records so far)", source, written,
                     )
 
-            logger.info("%s: sync complete (%d records)", source, len(normalized))
+            if buffer:
+                async with pool.acquire() as conn:
+                    async with conn.transaction():
+                        for vuln in buffer:
+                            await save_vulnerability(conn, vuln)
+                written += len(buffer)
+
+            async with pool.acquire() as conn:
+                await update_last_sync(
+                    conn, source, datetime.now(timezone.utc), written,
+                )
+
+            logger.info("%s: sync complete (%d records)", source, written)
         except Exception:
             logger.exception("%s: sync failed, will retry next cycle", source)
 

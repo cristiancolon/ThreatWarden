@@ -26,15 +26,14 @@ class OSVIngestor(Ingestor):
     def source_name(self) -> str:
         return "osv"
 
-    async def fetch_updates(self, since: datetime | None) -> list[RawVulnerability]:
-        results: list[RawVulnerability] = []
-
+    async def fetch_updates(self, since: datetime | None):
         async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
             for ecosystem in self.ecosystems:
                 url = f"{_GCS_BASE}/{ecosystem}/all.zip"
                 response = await client.get(url)
                 response.raise_for_status()
 
+                page: list[RawVulnerability] = []
                 with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
                     for name in zf.namelist():
                         if not name.endswith(".json"):
@@ -59,7 +58,7 @@ class OSVIngestor(Ingestor):
                             continue
 
                         for cve_id in cve_ids:
-                            results.append(
+                            page.append(
                                 RawVulnerability(
                                     cve_id=cve_id,
                                     source=self.source_name(),
@@ -67,7 +66,8 @@ class OSVIngestor(Ingestor):
                                 ),
                             )
 
-        return results
+                if page:
+                    yield page
 
     def _normalize(self, raw: dict[str, Any]) -> NormalizedVulnerability:
         aliases = raw.get("aliases") or []

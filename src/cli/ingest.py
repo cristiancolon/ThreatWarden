@@ -45,19 +45,22 @@ async def _run_ingestor_loop(
                 since = await get_last_sync(conn, source)
 
             logger.info("%s: starting sync (since=%s)", source, since)
-            raw = await ingestor.fetch_updates(since)
-            normalized = ingestor.normalize_updates([r.raw_data for r in raw])
-            logger.info("%s: fetched %d records, writing to db", source, len(normalized))
+
+            written = 0
+            async for page in ingestor.fetch_updates(since):
+                normalized = ingestor.normalize_updates([r.raw_data for r in page])
+                async with pool.acquire() as conn:
+                    async with conn.transaction():
+                        for vuln in normalized:
+                            await save_vulnerability(conn, vuln)
+                written += len(normalized)
 
             async with pool.acquire() as conn:
-                async with conn.transaction():
-                    for vuln in normalized:
-                        await save_vulnerability(conn, vuln)
-                    await update_last_sync(
-                        conn, source, datetime.now(timezone.utc), len(normalized),
-                    )
+                await update_last_sync(
+                    conn, source, datetime.now(timezone.utc), written,
+                )
 
-            logger.info("%s: sync complete (%d records)", source, len(normalized))
+            logger.info("%s: sync complete (%d records)", source, written)
         except Exception:
             logger.exception("%s: sync failed, will retry next cycle", source)
 
@@ -106,7 +109,7 @@ async def sync(
         err_console.print("[red]Provide --source NAME or --all[/]")
         raise typer.Exit(1)
 
-    targets: list[str] = list(ALL_INGESTORS.keys()) if all_sources else [source]
+    targets = list(ALL_INGESTORS.keys()) if all_sources else [source]
 
     for name in targets:
         if name not in ALL_INGESTORS:
@@ -126,18 +129,21 @@ async def sync(
             async with pool.acquire() as conn:
                 since = await get_last_sync(conn, name)
 
-            raw = await ingestor.fetch_updates(since)
-            normalized = ingestor.normalize_updates([r.raw_data for r in raw])
+            written = 0
+            async for page in ingestor.fetch_updates(since):
+                normalized = ingestor.normalize_updates([r.raw_data for r in page])
+                async with pool.acquire() as conn:
+                    async with conn.transaction():
+                        for vuln in normalized:
+                            await save_vulnerability(conn, vuln)
+                written += len(normalized)
 
             async with pool.acquire() as conn:
-                async with conn.transaction():
-                    for vuln in normalized:
-                        await save_vulnerability(conn, vuln)
-                    await update_last_sync(
-                        conn, name, datetime.now(timezone.utc), len(normalized),
-                    )
+                await update_last_sync(
+                    conn, name, datetime.now(timezone.utc), written,
+                )
 
-            console.print(f"[green]{name}:[/] {len(normalized)} records synced")
+            console.print(f"[green]{name}:[/] {written} records synced")
         except Exception as exc:
             err_console.print(f"[red]{name}: sync failed — {exc}[/]")
 
