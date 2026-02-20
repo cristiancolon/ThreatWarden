@@ -65,3 +65,29 @@ CREATE INDEX IF NOT EXISTS idx_vuln_kev ON vulnerabilities(cisa_kev) WHERE cisa_
 CREATE INDEX IF NOT EXISTS idx_affected_pkg_ecosystem ON affected_packages(ecosystem, package_name);
 CREATE INDEX IF NOT EXISTS idx_affected_pkg_cve ON affected_packages(cve_id);
 CREATE INDEX IF NOT EXISTS idx_exploits_cve ON exploits(cve_id);
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS crawl_progress (
+    id       SERIAL PRIMARY KEY,
+    cve_id   TEXT NOT NULL,
+    url      TEXT NOT NULL,
+    domain   TEXT NOT NULL,
+    status   TEXT NOT NULL DEFAULT 'pending',
+    attempts SMALLINT DEFAULT 0,
+    UNIQUE (cve_id, url)
+);
+CREATE INDEX IF NOT EXISTS idx_crawl_pending
+    ON crawl_progress(status) WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS advisory_content (
+    id           SERIAL PRIMARY KEY,
+    cve_id       TEXT NOT NULL REFERENCES vulnerabilities(cve_id) ON DELETE CASCADE,
+    url          TEXT NOT NULL,
+    content      TEXT,
+    embedding    vector(1536),
+    crawled_at   TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (cve_id, url)
+);
+CREATE INDEX IF NOT EXISTS idx_advisory_embedding
+    ON advisory_content USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
