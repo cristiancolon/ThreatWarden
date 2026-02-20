@@ -70,7 +70,7 @@ async def get_response_with_retry(
         last_response = None
         for attempt in range(max_retries):
             try:
-                response = await client.get(url, headers=headers, params=params or {})
+                response = await client.get(url, headers=headers, params=params)
             except httpx.TransportError:
                 if attempt < max_retries - 1:
                     logger.warning(

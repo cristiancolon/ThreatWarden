@@ -84,7 +84,7 @@ async def start() -> None:
         (NVDIngestor(), six_hours),
         (GithubIngestor(), six_hours),
         (OSVIngestor(), six_hours),
-        (ExploitDBIngestor(), daily),
+        (ExploitDBIngestor(pool), daily),
         (CISAKEVIngestor(), daily),
         (EPSSIngestor(), daily),
     ]

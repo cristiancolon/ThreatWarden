@@ -151,22 +151,22 @@ class TestParseDateRange:
     def test_last_n_days(self):
         cutoff = _parse_date_range("last 7 days")
         expected = datetime.now(tz=timezone.utc) - timedelta(days=7)
-        assert abs((cutoff - expected).total_seconds()) < 5
+        assert cutoff is not None and abs((cutoff - expected).total_seconds()) < 5
 
     def test_last_n_weeks(self):
         cutoff = _parse_date_range("last 2 weeks")
         expected = datetime.now(tz=timezone.utc) - timedelta(weeks=2)
-        assert abs((cutoff - expected).total_seconds()) < 5
+        assert cutoff is not None and abs((cutoff - expected).total_seconds()) < 5
 
     def test_last_n_months(self):
         cutoff = _parse_date_range("last 3 months")
         expected = datetime.now(tz=timezone.utc) - timedelta(days=90)
-        assert abs((cutoff - expected).total_seconds()) < 5
+        assert cutoff is not None and abs((cutoff - expected).total_seconds()) < 5
 
     def test_last_1_year(self):
         cutoff = _parse_date_range("last 1 year")
         expected = datetime.now(tz=timezone.utc) - timedelta(days=365)
-        assert abs((cutoff - expected).total_seconds()) < 5
+        assert cutoff is not None and abs((cutoff - expected).total_seconds()) < 5
 
     def test_unrecognized_returns_none(self):
         assert _parse_date_range("since January 2025") is None
@@ -174,7 +174,7 @@ class TestParseDateRange:
     def test_singular_unit(self):
         cutoff = _parse_date_range("last 1 day")
         expected = datetime.now(tz=timezone.utc) - timedelta(days=1)
-        assert abs((cutoff - expected).total_seconds()) < 5
+        assert cutoff is not None and abs((cutoff - expected).total_seconds()) < 5
 
 
 # ── execute_query ──────────────────────────────────────────────────────────

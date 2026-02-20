@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timezone
+import logging
 import os
 import re
 import asyncio
@@ -8,6 +9,8 @@ from .base import (
     Ingestor, RawVulnerability, NormalizedVulnerability,
     AffectedPackage, Reference, get_response_with_retry,
 )
+
+logger = logging.getLogger("threatwarden.github")
 
 
 _LINK_NEXT_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
@@ -36,15 +39,20 @@ class GithubIngestor(Ingestor):
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
 
-        params: dict[str, Any] = {
+        params: dict[str, Any] | None = {
             "per_page": self.page_size,
             "type": "reviewed",
         }
         if since is not None:
             since_str = since.strftime(self.date_format)
-            params["modified"] = f"{since_str}..*"
+            now_str = datetime.now(timezone.utc).strftime(self.date_format)
+            params["modified"] = f"{since_str}..{now_str}"
 
         url: str | None = self.base_url
+        seen_cve_ids: set[str] = set()
+        consecutive_stale = 0
+        page_count = 0
+        _STALE_LIMIT = 50
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             while url is not None:
@@ -52,15 +60,40 @@ class GithubIngestor(Ingestor):
                     client, url, headers=headers, params=params,
                 )
                 page = []
+                new_on_page = 0
                 for advisory in response.json():
                     cve_id = advisory.get("cve_id")
                     if cve_id:
                         page.append(RawVulnerability(cve_id, self.source_name(), advisory))
+                        if cve_id not in seen_cve_ids:
+                            seen_cve_ids.add(cve_id)
+                            new_on_page += 1
                 if page:
                     yield page
 
+                page_count += 1
+
+                if page and new_on_page == 0:
+                    consecutive_stale += 1
+                elif page:
+                    consecutive_stale = 0
+
+                if consecutive_stale >= _STALE_LIMIT:
+                    logger.warning(
+                        "stopping: %d consecutive pages with no new CVE IDs "
+                        "(%d unique CVEs across %d pages)",
+                        consecutive_stale, len(seen_cve_ids), page_count,
+                    )
+                    break
+
+                if page_count % 100 == 0:
+                    logger.info(
+                        "page %d (%d unique CVEs so far)",
+                        page_count, len(seen_cve_ids),
+                    )
+
                 url = parse_next_url(response.headers.get("Link"))
-                params = {}
+                params = None
 
                 if url is not None:
                     await asyncio.sleep(self.request_delay)

@@ -123,7 +123,7 @@ async def test_fetch_incremental_adds_modified_param():
     _, kwargs = mock_get.call_args
     params = kwargs["params"]
     assert "modified" in params
-    assert params["modified"] == "2025-02-01T14:30:00Z..*"
+    assert params["modified"] == f"2025-02-01T14:30:00Z..{datetime.now(timezone.utc).strftime(GithubIngestor().date_format)}"
 
 
 async def test_fetch_pagination_follows_link_header():

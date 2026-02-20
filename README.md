@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="public/threat_warden_logo.png" alt="ThreatWarden Logo" width="300">
+</p>
+
 # ThreatWarden
 
 ## Table of Contents
@@ -90,24 +94,23 @@ Several projects occupy adjacent parts of this space:
 ## 4. System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   Ingestion Service                     │
-│                  (asyncio scheduler)                    │
-│                                                         │
-│  ┌───────────┐ ┌──────────┐ ┌────────┐ ┌──────────┐     │
-│  │    NVD    │ │  GitHub  │ │  CISA  │ │   EPSS   │     │
-│  │ Ingestor  │ │ Ingestor │ │  KEV   │ │ Ingestor │     │
-│  │(fetch +   │ │(fetch +  │ │Ingestor│ │          │     │
-│  │normalize) │ │normalize)│ │        │ │          │     │
-│  └─────┬─────┘ └────┬─────┘ └───┬────┘ └────┬─────┘     │
-│        │             │           │            │         │
-│        └──────┬──────┴─────┬─────┴────────────┘         │
-│               │            │                            │
-│         ┌─────▼────────────▼────┐                       │
-│         │  db/writer.py         │                       │
-│         │  (upsert + COALESCE)  │                       │
-│         └───────────┬───────────┘                       │
-└─────────────────────┼───────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│                         Ingestion Service                             │
+│                        (asyncio scheduler)                            │
+│                                                                       │
+│  ┌───────┐ ┌────────┐ ┌──────┐ ┌──────┐ ┌─────────┐ ┌───────────┐     │
+│  │  NVD  │ │ GitHub │ │ CISA │ │ EPSS │ │ OSV.dev │ │ ExploitDB │     │
+│  │       │ │        │ │ KEV  │ │      │ │         │ │ (enriches │     │
+│  │       │ │        │ │      │ │      │ │         │ │  from DB) │     │
+│  └───┬───┘ └───┬────┘ └──┬───┘ └──┬───┘ └────┬────┘ └─────┬─────┘     │
+│      │         │         │        │           │             │         │
+│      └────┬────┴────┬────┴────┬───┴───────────┴─────────────┘         │
+│           │         │         │                                       │
+│     ┌─────▼─────────▼─────────▼────┐                                  │
+│     │  db/writer.py                │                                  │
+│     │  (upsert + COALESCE)         │                                  │
+│     └──────────────┬───────────────┘                                  │
+└────────────────────┼──────────────────────────────────────────────────┘
                       │
               ┌───────▼────────┐
               │   PostgreSQL   │
@@ -164,7 +167,7 @@ Each source is implemented as an independent **Ingestor** class (one file per so
 | **GitHub Security Advisories** | REST API (`api.github.com/advisories`) | Every 6 hours | Package-level vulnerability mappings (ecosystem, package name, vulnerable version ranges, patched versions), CVSS via `cvss_severities`, EPSS scores | P0 — best for dependency-level matching |
 | **CISA KEV** | Static JSON download (`cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json`) | Daily | Confirmed actively-exploited CVE IDs, due dates, required actions | P0 — critical severity signal |
 | **EPSS (Exploit Prediction Scoring System)** | CSV download (`epss.cyentia.com`) | Daily | Probability score (0–1) that a CVE will be exploited in the next 30 days, percentile | P1 — prioritization signal |
-| **Exploit-DB** | Git mirror clone + CSV index (`gitlab.com/exploit-database/exploitdb`) | Daily | Proof-of-concept exploit code, metadata, linked CVEs | P1 — exploit maturity signal |
+| **Exploit-DB** | Database enrichment (scans `cve_references` for `exploit-db.com` URLs) | Daily | Proof-of-concept exploit metadata (EDB ID, URL) derived from references already collected by NVD and GitHub | P1 — exploit maturity signal |
 | **OSV.dev** | REST API (`api.osv.dev`) | Every 6 hours | Standardized vulnerability records across 40+ ecosystems, precise affected version ranges per package | P1 — supplements NVD/GitHub with broader ecosystem coverage and machine-readable version constraints |
 
 **Note:** The GitHub Advisory REST API deprecated the `cvss` field in April 2025, replacing it with `cvss_severities` (separate `cvss_v3` and `cvss_v4` objects). The API also provides EPSS data directly. References are returned as plain URL strings, not objects.
@@ -210,7 +213,8 @@ Normalization is handled per-ingestor via the `_normalize` method rather than a 
 
 - **NVD:** Deeply nested JSON (`metrics.cvssMetricV31[0].cvssData.baseScore`). Extracts CVSS (preferring v3.1 > v4.0 > v2, preferring Primary source), English description, dates, CISA KEV status, and reference URLs with tag mapping.
 - **GitHub:** Flatter JSON. Primary value is the `vulnerabilities` array → `AffectedPackage` objects. Uses `cvss_severities` (not the deprecated `cvss` field). Normalizes EPSS from 0–100 scale to 0–1. References are plain URL strings.
-- **CISA KEV / EPSS / Exploit-DB:** Each has its own minimal response structure.
+- **CISA KEV / EPSS:** Each has its own minimal response structure (JSON and CSV, respectively).
+- **Exploit-DB:** No external API — enriches from the local `cve_references` table, scanning for `exploit-db.com` URLs and extracting EDB IDs via regex.
 
 This separation means an API schema change in one source only requires editing one file. A change to the internal `NormalizedVulnerability` structure only requires updating the `_normalize` methods.
 
@@ -236,8 +240,11 @@ The scheduler uses plain **asyncio** rather than APScheduler. Each ingestor runs
 - **Overlap window:** On subsequent syncs, 1 hour is subtracted from the high-water mark before fetching. This re-fetches a small window of already-seen records (harmless — upserts are idempotent) but catches records that appeared in the API with an indexing delay.
 - **Batched writes:** Records are committed in batches of 2,000, each in its own transaction. This reduces lock contention (prevents deadlocks when multiple ingestors write overlapping CVEs concurrently) and limits transaction duration.
 - Configurable intervals via environment variables (`FAST_INTERVAL`, `DAILY_INTERVAL`).
-- Default schedule: NVD + GitHub every 6 hours, CISA KEV + EPSS + Exploit-DB daily.
+- Default schedule: NVD + GitHub + OSV every 6 hours, CISA KEV + EPSS + Exploit-DB daily.
 - `asyncio.TaskGroup` runs all tasks concurrently with failure isolation — one source failing does not affect others.
+- **Cooldown on restart:** When the scheduler starts, each ingestor checks `last_successful_sync` against its interval. If the elapsed time is less than the interval, it sleeps for the remaining duration instead of re-syncing. This prevents wasteful duplicate syncs when the process is restarted.
+- **Dependency ordering:** ExploitDB waits for NVD's first sync cycle to complete before starting its own, using an `asyncio.Event`. This ensures `cve_references` is populated before ExploitDB queries it. On subsequent cycles the event is already set and ExploitDB runs independently.
+- **Manual refresh (`--refresh`):** `python scheduler.py --refresh nvd github` performs an immediate one-shot sync of the named sources and exits. Without `--refresh`, the scheduler runs continuously in its normal scheduled loop.
 - On first run, `sync_metadata` returns `None` for the high-water mark, causing `fetch_updates(None)` to perform a full historical sync (no overlap applied).
 - Crash recovery is automatic: if a batch fails, previously committed batches are safe and the high-water mark is not updated (it is written in a separate transaction after all batches complete), so the next cycle re-fetches the same window. Upserts are idempotent, so re-processing is safe.
 
@@ -521,7 +528,7 @@ This works well for Phase 1 because vulnerability data is inherently structured.
 
 #### 5.4.2 Phase 1.5 — Adding Semantic Search
 
-Once the web crawler (Section 6.3) populates `crawled_content` and `embeddings`, a second retrieval path is added:
+Once the web crawler (Section 5.3) populates `crawled_content` and `embeddings`, a second retrieval path is added:
 
 ```
 User Question
@@ -913,7 +920,15 @@ The scheduler runs on the host and manages all ingestors concurrently:
 cd src && python scheduler.py
 ```
 
-The `init_schema` function runs on startup and creates all tables if they don't exist. On first run, each ingestor performs a full historical sync (NVD: ~250K CVEs, EPSS: ~300K scores). Subsequent runs only fetch updates since the last checkpoint.
+The `init_schema` function runs on startup and creates all tables if they don't exist. On first run, each ingestor performs a full historical sync (NVD: ~250K CVEs, EPSS: ~300K scores). Subsequent runs only fetch updates since the last checkpoint. If the scheduler is restarted before an interval elapses, each ingestor sleeps for the remaining time rather than re-syncing.
+
+To force-refresh specific sources immediately (then exit):
+
+```bash
+cd src && python scheduler.py --refresh nvd github epss
+```
+
+Valid source names: `nvd`, `github`, `osv`, `exploitdb`, `epss`, `cisa_kev`.
 
 Alternatively, use the CLI for more control:
 
